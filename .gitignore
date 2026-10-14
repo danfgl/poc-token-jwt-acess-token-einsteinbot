@@ -1,8 +1,5 @@
 target/
 .mule/
-*.pfx
-*.p12
-*.key
 .settings/
 .classpath
 .project

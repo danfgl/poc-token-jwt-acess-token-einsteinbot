@@ -12,7 +12,9 @@ sf:
     username: "raphael.e.silva@accenture.com.aegea.dev"
     audience: "https://test.salesforce.com"
 
-bot:
-  runtimeHost: "runtime-api-na-west.prod.chattr.salesforce.com"
-  botId: "0XxXXXXXXXXXXXXXXX"
+# Interaction Service API (BYOC)
+byoc:
+  host: "customer-force-2060--dev.sandbox.my.salesforce-scrt.com"   # host SCRT (nao e o my.salesforce.com)
   orgId: "00Dbe000003UQwR"
+  authorizationContext: "EV_InstagramSFBYOC"   # DeveloperName do Conversation Channel Definition
+  channelAddressId: "76cb1dfa-9654-4944-b6b3-7086da0a256b"   # campo "to" da interacao

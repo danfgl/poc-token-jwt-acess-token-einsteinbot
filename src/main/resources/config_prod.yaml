@@ -10,7 +10,9 @@ sf:
     username: "<usuario.integracao>@<dominio>"
     audience: "https://login.salesforce.com"
 
-bot:
-  runtimeHost: "<runtime-host-prod>"
-  botId: "<botId-prod>"
+# Interaction Service API (BYOC)
+byoc:
+  host: "<org-prod>.my.salesforce-scrt.com"   # host SCRT (nao e o my.salesforce.com)
   orgId: "<orgId-prod>"
+  authorizationContext: "<conversationChannelDefinition-prod>"   # DeveloperName do Conversation Channel Definition
+  channelAddressId: "<channelAddressId-prod>"   # campo "to" da interacao

@@ -35,13 +35,15 @@
     <http:listener-config name="HTTP_Listener_Config">
         <http:listener-connection host="0.0.0.0" port="${http.port}"/>
     </http:listener-config>
+    
 
     <http:request-config name="SF_Token_Config">
         <http:request-connection protocol="HTTPS" host="${sf.token.host}" port="443"/>
     </http:request-config>
 
-    <http:request-config name="Bot_Runtime_Config">
-        <http:request-connection protocol="HTTPS" host="${bot.runtimeHost}" port="443"/>
+    <!-- Interaction Service API (BYOC) - host SCRT da org (diferente do my.salesforce.com) -->
+    <http:request-config name="BYOC_Interaction_Config">
+        <http:request-connection protocol="HTTPS" host="${byoc.host}" port="443"/>
     </http:request-config>
 
     <!-- Salesforce nao devolve expires_in no JWT flow: TTL abaixo do Session Timeout da org -->
@@ -118,38 +120,6 @@ output application/json
         <error-handler ref="Poc_Error_Handler"/>
     </flow>
 
-    <!-- POST /api/bot/session  body: { "text": "oi" } : abre sessao no Einstein Bot -->
-    <flow name="post-bot-session">
-        <http:listener config-ref="HTTP_Listener_Config" path="/api/bot/session" allowedMethods="POST">
-            <http:error-response statusCode="#[vars.httpStatus default 500]">
-                <http:body><![CDATA[#[payload]]]></http:body>
-            </http:error-response>
-        </http:listener>
-
-        <set-variable variableName="userText" value="#[payload.text default 'Oi']"/>
-
-        <flow-ref name="sf-get-access-token"/>
-
-        <http:request method="POST" config-ref="Bot_Runtime_Config" path="/${bot.apiVersion}/bots/{botId}/sessions">
-            <http:body><![CDATA[#[%dw 2.0
-output application/json
----
-{
-    externalSessionKey: uuid(),
-    message: { text: vars.userText },
-    forceConfig: { endpoint: vars.instanceUrl ++ "/" }
-}]]]></http:body>
-            <http:headers><![CDATA[#[{
-                "Authorization": "Bearer " ++ vars.sfToken,
-                "X-Org-Id": p('bot.orgId'),
-                "X-Request-ID": uuid()
-            }]]]></http:headers>
-            <http:uri-params><![CDATA[#[{ botId: p('bot.botId') }]]]></http:uri-params>
-        </http:request>
-
-        <error-handler ref="Poc_Error_Handler"/>
-    </flow>
-
     <!-- ===================== TOKEN ===================== -->
 
     <sub-flow name="sf-get-access-token">
@@ -219,10 +189,161 @@ output application/x-www-form-urlencoded
         </try>
     </sub-flow>
 
+    <!-- ===================== BYOC (Interaction Service API) ===================== -->
+
+    <!-- POST /api/byoc/send
+         Body: o JSON completo da interacao (to, from, interactions[]), igual ao usado no Postman/curl.
+         Util para testar qualquer tipo de interacao montando o payload na mao. -->
+    <flow name="post-byoc-send">
+        <http:listener config-ref="HTTP_Listener_Config" path="/api/byoc/send" allowedMethods="POST">
+            <http:response statusCode="#[vars.sfStatus default 200]"/>
+            <http:error-response statusCode="#[vars.httpStatus default 500]">
+                <http:body><![CDATA[#[payload]]]></http:body>
+            </http:error-response>
+        </http:listener>
+
+        <set-variable variableName="interaction" value="#[payload]"/>
+
+        <flow-ref name="byoc-send-interaction"/>
+
+        <error-handler ref="Poc_Error_Handler"/>
+    </flow>
+
+    <!-- POST /api/interactions
+         Body: { "from": "<id do usuario final>", "text": "oi" }
+         Monta a EntryInteraction (mensagem de texto) com IDs e timestamp novos e envia ao BYOC.
+         A resposta do bot NAO volta aqui: o Salesforce entrega de forma assincrona
+         no endpoint de saida configurado no canal. -->
+    <flow name="post-interaction">
+        <http:listener config-ref="HTTP_Listener_Config" path="/api/interactions" allowedMethods="POST">
+            <http:response statusCode="#[vars.sfStatus default 200]"/>
+            <http:error-response statusCode="#[vars.httpStatus default 500]">
+                <http:body><![CDATA[#[payload]]]></http:body>
+            </http:error-response>
+        </http:listener>
+
+        <choice>
+            <when expression="#[isEmpty(payload.from) or isEmpty(payload.text)]">
+                <raise-error type="APP:BAD_REQUEST" description="Campos obrigatorios: from, text"/>
+            </when>
+        </choice>
+
+        <!-- payload.id e abstractMessage.id precisam ser IGUAIS (senao: "Interaction ID and Message ID are mismatched") -->
+        <set-variable variableName="messageId" value="#[uuid()]"/>
+
+        <ee:transform>
+            <ee:variables>
+                <ee:set-variable variableName="interaction"><![CDATA[%dw 2.0
+output application/json
+---
+{
+    to: p('byoc.channelAddressId'),
+    from: payload.from,
+    interactions: [
+        {
+            timestamp: now() as Number {unit: "milliseconds"},
+            interactionType: "EntryInteraction",
+            payload: {
+                id: vars.messageId,
+                entryType: "Message",
+                abstractMessage: {
+                    messageType: "StaticContentMessage",
+                    id: vars.messageId,
+                    staticContent: {
+                        formatType: "Text",
+                        text: payload.text
+                    }
+                }
+            }
+        }
+    ]
+}]]></ee:set-variable>
+            </ee:variables>
+        </ee:transform>
+
+        <flow-ref name="byoc-send-interaction"/>
+
+        <ee:transform>
+            <ee:message>
+                <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{
+    status: vars.sfStatus,
+    requestId: vars.requestId,
+    messageId: vars.messageId,
+    resposta: payload
+}]]></ee:set-payload>
+            </ee:message>
+        </ee:transform>
+
+        <error-handler ref="Poc_Error_Handler"/>
+    </flow>
+
+    <!-- Envia vars.interaction ao BYOC.
+         Entrada: vars.interaction (objeto JSON da interacao)
+         Saida:   payload = resposta do Salesforce, vars.sfStatus, vars.requestId -->
+    <sub-flow name="byoc-send-interaction">
+        <set-variable variableName="requestId" value="#[uuid()]"/>
+
+        <!-- Token (cache ou novo via JWT) -> vars.sfToken -->
+        <flow-ref name="sf-get-access-token"/>
+
+        <!-- Multipart com UMA parte "json", sem filename, Content-Type application/json.
+             content recebe o OBJETO: usar write() aqui serializa duas vezes (vira string com aspas escapadas). -->
+        <ee:transform>
+            <ee:message>
+                <ee:set-payload><![CDATA[%dw 2.0
+output multipart/form-data
+---
+{
+    parts: {
+        json: {
+            headers: {
+                "Content-Disposition": { name: "json" },
+                "Content-Type": "application/json"
+            },
+            content: vars.interaction
+        }
+    }
+}]]></ee:set-payload>
+            </ee:message>
+        </ee:transform>
+
+        <!-- Expressoes de log com write() precisam de "output text/plain";
+             e nada de "<" dentro de atributo XML -->
+        <logger level="INFO" message="#[output text/plain --- 'BYOC envio - RequestId=' ++ vars.requestId ++ ' | body=' ++ write(vars.interaction, 'application/json', {indent: false})]"/>
+
+        <!-- Content-Type (com boundary) e gerado pelo Mule a partir do payload multipart: nao definir manualmente -->
+        <http:request method="POST" config-ref="BYOC_Interaction_Config" path="${byoc.path}">
+            <http:headers><![CDATA[#[{
+                "Authorization": "Bearer " ++ vars.sfToken,
+                "OrgId": p('byoc.orgId'),
+                "AuthorizationContext": p('byoc.authorizationContext'),
+                "RequestId": vars.requestId
+            }]]]></http:headers>
+            <!-- Aceita qualquer status para devolver a resposta do Salesforce como veio -->
+            <http:response-validator>
+                <http:success-status-code-validator values="100..599"/>
+            </http:response-validator>
+        </http:request>
+
+        <set-variable variableName="sfStatus" value="#[attributes.statusCode]"/>
+
+        <!-- 401: token invalido/expirado. Limpa o cache para a proxima chamada gerar token novo -->
+        <choice>
+            <when expression="#[vars.sfStatus == 401]">
+                <flow-ref name="sf-invalidate-access-token"/>
+            </when>
+        </choice>
+
+        <logger level="INFO" message="#[output text/plain --- 'BYOC resposta - status=' ++ (vars.sfStatus as String) ++ ' | RequestId=' ++ vars.requestId ++ ' | body=' ++ write(payload, 'application/json', {indent: false})]"/>
+    </sub-flow>
+
     <!-- ===================== ERROS ===================== -->
 
     <error-handler name="Poc_Error_Handler">
-        <!-- 401 do bot/Salesforce: limpa o cache para a proxima chamada gerar token novo -->
+        <!-- 401 do Salesforce: limpa o cache para a proxima chamada gerar token novo -->
         <on-error-propagate type="HTTP:UNAUTHORIZED">
             <flow-ref name="sf-invalidate-access-token"/>
             <set-variable variableName="httpStatus" value="401"/>
@@ -245,6 +366,19 @@ output application/json
 output application/json
 ---
 { erro: error.errorType.identifier, detalhe: error.errorMessage.payload default error.description }]]></ee:set-payload>
+                </ee:message>
+            </ee:transform>
+        </on-error-propagate>
+
+        <!-- Entrada invalida no /api/interactions -->
+        <on-error-propagate type="APP:BAD_REQUEST">
+            <set-variable variableName="httpStatus" value="400"/>
+            <ee:transform>
+                <ee:message>
+                    <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{ erro: "BAD_REQUEST", detalhe: error.description }]]></ee:set-payload>
                 </ee:message>
             </ee:transform>
         </on-error-propagate>

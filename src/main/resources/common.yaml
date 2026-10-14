@@ -11,5 +11,5 @@ sf:
     ttlSeconds: "180"            # máximo aceito pelo Salesforce: 3 min
     keyAlias: ""                 # vazio = primeiro alias com chave privada no .pfx
 
-bot:
-  apiVersion: "v5.0.0"
+byoc:
+  path: "/api/v1/interactions"   # Interaction Service API
