@@ -1,0 +1,18 @@
+# DEV - sandbox customer-force-2060--dev
+# Valores criptografados: ![...] (Secure Properties Tool, AES/CBC, chave = secure.key do ambiente)
+# Enquanto não criptografar, valor aberto também funciona com o prefixo secure::
+
+sf:
+  token:
+    host: "customer-force-2060--dev.sandbox.my.salesforce.com"
+  jwt:
+    keystorePath: "certs/sf-jwt-dev.pfx"
+    keystorePassword: "SFByoc2026!"          # TODO: trocar por ![...]
+    clientId: "3MVG9jaVFD0NWW._5qYWhz2wlB0qiot.vxYtgfKSd2SdZADk0Fi3xqvXhK2WAsKFMIJfFMIRcHw3FYk2MiURr"   # TODO: ![...]
+    username: "raphael.e.silva@accenture.com.aegea.dev"
+    audience: "https://test.salesforce.com"
+
+bot:
+  runtimeHost: "runtime-api-na-west.prod.chattr.salesforce.com"
+  botId: "0XxXXXXXXXXXXXXXXX"
+  orgId: "00Dbe000003UQwR"

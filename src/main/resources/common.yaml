@@ -1,0 +1,15 @@
+# Configurações que não mudam entre ambientes
+
+http:
+  port: "8081"
+
+sf:
+  token:
+    path: "/services/oauth2/token"
+    cacheTtlMinutes: "60"        # abaixo do Session Timeout da org
+  jwt:
+    ttlSeconds: "180"            # máximo aceito pelo Salesforce: 3 min
+    keyAlias: ""                 # vazio = primeiro alias com chave privada no .pfx
+
+bot:
+  apiVersion: "v5.0.0"

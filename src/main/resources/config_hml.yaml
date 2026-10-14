@@ -1,0 +1,16 @@
+# HML - sandbox de homologação
+
+sf:
+  token:
+    host: "<org-hml>.sandbox.my.salesforce.com"
+  jwt:
+    keystorePath: "certs/sf-jwt-hml.pfx"
+    keystorePassword: "![...]"
+    clientId: "![...]"
+    username: "<usuario.integracao>@<dominio>.hml"
+    audience: "https://test.salesforce.com"
+
+bot:
+  runtimeHost: "<runtime-host-hml>"
+  botId: "<botId-hml>"
+  orgId: "<orgId-hml>"

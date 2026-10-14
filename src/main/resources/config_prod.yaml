@@ -1,0 +1,16 @@
+# PROD
+
+sf:
+  token:
+    host: "<org-prod>.my.salesforce.com"
+  jwt:
+    keystorePath: "certs/sf-jwt-prod.pfx"
+    keystorePassword: "![...]"
+    clientId: "![...]"
+    username: "<usuario.integracao>@<dominio>"
+    audience: "https://login.salesforce.com"
+
+bot:
+  runtimeHost: "<runtime-host-prod>"
+  botId: "<botId-prod>"
+  orgId: "<orgId-prod>"

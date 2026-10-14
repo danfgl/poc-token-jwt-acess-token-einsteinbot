@@ -1,0 +1,265 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+      xmlns="http://www.mulesoft.org/schema/mule/core"
+      xmlns:http="http://www.mulesoft.org/schema/mule/http"
+      xmlns:java="http://www.mulesoft.org/schema/mule/java"
+      xmlns:os="http://www.mulesoft.org/schema/mule/os"
+      xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
+      xmlns:secure-properties="http://www.mulesoft.org/schema/mule/secure-properties"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="
+        http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+        http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd
+        http://www.mulesoft.org/schema/mule/java http://www.mulesoft.org/schema/mule/java/current/mule-java.xsd
+        http://www.mulesoft.org/schema/mule/os http://www.mulesoft.org/schema/mule/os/current/mule-os.xsd
+        http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd
+        http://www.mulesoft.org/schema/mule/secure-properties http://www.mulesoft.org/schema/mule/secure-properties/current/mule-secure-properties.xsd">
+
+    <!-- ===================== CONFIGS ===================== -->
+
+    <!-- env e secure.key vêm do runtime (Studio: VM arguments / CloudHub: properties do app).
+         Default de env = dev para rodar local. -->
+    <global-property name="env" value="dev"/>
+
+    <!-- Valores fixos, iguais em todos os ambientes -->
+    <configuration-properties file="common.yaml"/>
+
+    <!-- Um único arquivo por ambiente, lido duas vezes:
+         - configuration-properties: valores abertos  -> ${chave} / p('chave')
+         - secure-properties       : valores ![...]   -> ${secure::chave} / p('secure::chave') -->
+    <configuration-properties file="config_${env}.yaml"/>
+    <secure-properties:config name="Secure_Properties_Config"
+                              file="config_${env}.yaml"
+                              key="${secure.key}">
+    </secure-properties:config>
+
+    <http:listener-config name="HTTP_Listener_Config">
+        <http:listener-connection host="0.0.0.0" port="${http.port}"/>
+    </http:listener-config>
+
+    <http:request-config name="SF_Token_Config">
+        <http:request-connection protocol="HTTPS" host="${sf.token.host}" port="443"/>
+    </http:request-config>
+
+    <http:request-config name="Bot_Runtime_Config">
+        <http:request-connection protocol="HTTPS" host="${bot.runtimeHost}" port="443"/>
+    </http:request-config>
+
+    <!-- Salesforce nao devolve expires_in no JWT flow: TTL abaixo do Session Timeout da org -->
+    <os:object-store name="SF_Token_Store"
+                     persistent="false"
+                     entryTtl="${sf.token.cacheTtlMinutes}"
+                     entryTtlUnit="MINUTES"/>
+
+    <!-- ===================== ENDPOINTS DA POC ===================== -->
+
+    <!-- GET /api/jwt : gera o JWT assinado e devolve header/payload decodificados -->
+    <global-property doc:name="Global Property" doc:id="44bb8d2d-f106-4d83-b87f-cd8083fc90b3" name="secure.key" value="nPevn9xjsZVsM3DhTn9Y" />
+	<flow name="get-jwt">
+        <http:listener config-ref="HTTP_Listener_Config" path="/api/jwt" allowedMethods="GET"/>
+
+        <flow-ref name="sf-build-jwt"/>
+
+        <ee:transform>
+            <ee:message>
+                <ee:set-payload><![CDATA[%dw 2.0
+import fromBase64 from dw::core::Binaries
+import rightPad from dw::core::Strings
+output application/json
+
+fun b64url(s: String) =
+    do {
+        var b = s replace "-" with "+" replace "_" with "/"
+        var pad = (4 - (sizeOf(b) mod 4)) mod 4
+        ---
+        read(fromBase64(rightPad(b, sizeOf(b) + pad, "=")) as String, "application/json")
+    }
+
+var parts = vars.jwt splitBy "."
+---
+{
+    jwt: vars.jwt,
+    header: b64url(parts[0]),
+    payload: b64url(parts[1]),
+    expiraEm: (b64url(parts[1]).exp as DateTime {unit: "seconds"}) >> "America/Sao_Paulo"
+}]]></ee:set-payload>
+            </ee:message>
+        </ee:transform>
+    </flow>
+
+    <!-- GET /api/token[?force=true] : troca o JWT pelo access token (com cache) -->
+    <flow name="get-token">
+        <http:listener config-ref="HTTP_Listener_Config" path="/api/token" allowedMethods="GET">
+            <http:error-response statusCode="#[vars.httpStatus default 500]">
+                <http:body><![CDATA[#[payload]]]></http:body>
+            </http:error-response>
+        </http:listener>
+
+        <choice>
+            <when expression="#[attributes.queryParams.force == 'true']">
+                <flow-ref name="sf-invalidate-access-token"/>
+            </when>
+        </choice>
+
+        <flow-ref name="sf-get-access-token"/>
+
+        <ee:transform>
+            <ee:message>
+                <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{
+    origem: if (vars.tokenFromCache default false) "cache" else "salesforce",
+    instanceUrl: vars.instanceUrl,
+    accessToken: vars.sfToken
+}]]></ee:set-payload>
+            </ee:message>
+        </ee:transform>
+
+        <error-handler ref="Poc_Error_Handler"/>
+    </flow>
+
+    <!-- POST /api/bot/session  body: { "text": "oi" } : abre sessao no Einstein Bot -->
+    <flow name="post-bot-session">
+        <http:listener config-ref="HTTP_Listener_Config" path="/api/bot/session" allowedMethods="POST">
+            <http:error-response statusCode="#[vars.httpStatus default 500]">
+                <http:body><![CDATA[#[payload]]]></http:body>
+            </http:error-response>
+        </http:listener>
+
+        <set-variable variableName="userText" value="#[payload.text default 'Oi']"/>
+
+        <flow-ref name="sf-get-access-token"/>
+
+        <http:request method="POST" config-ref="Bot_Runtime_Config" path="/${bot.apiVersion}/bots/{botId}/sessions">
+            <http:body><![CDATA[#[%dw 2.0
+output application/json
+---
+{
+    externalSessionKey: uuid(),
+    message: { text: vars.userText },
+    forceConfig: { endpoint: vars.instanceUrl ++ "/" }
+}]]]></http:body>
+            <http:headers><![CDATA[#[{
+                "Authorization": "Bearer " ++ vars.sfToken,
+                "X-Org-Id": p('bot.orgId'),
+                "X-Request-ID": uuid()
+            }]]]></http:headers>
+            <http:uri-params><![CDATA[#[{ botId: p('bot.botId') }]]]></http:uri-params>
+        </http:request>
+
+        <error-handler ref="Poc_Error_Handler"/>
+    </flow>
+
+    <!-- ===================== TOKEN ===================== -->
+
+    <sub-flow name="sf-get-access-token">
+        <os:retrieve key="sfToken" objectStore="SF_Token_Store" target="cached">
+            <os:default-value>#[{}]</os:default-value>
+        </os:retrieve>
+
+        <choice>
+            <when expression="#[isEmpty(vars.cached.accessToken)]">
+                <flow-ref name="sf-generate-access-token"/>
+            </when>
+            <otherwise>
+                <set-variable variableName="sfToken" value="#[vars.cached.accessToken]"/>
+                <set-variable variableName="instanceUrl" value="#[vars.cached.instanceUrl]"/>
+                <set-variable variableName="tokenFromCache" value="#[true]"/>
+            </otherwise>
+        </choice>
+    </sub-flow>
+
+    <sub-flow name="sf-build-jwt">
+        <java:invoke-static class="com.accenture.sf.auth.JwtSigner"
+                            method="sign(java.lang.String,java.lang.String,java.lang.String,java.lang.String,java.lang.String,java.lang.String,int)"
+                            target="jwt">
+            <java:args><![CDATA[#[{
+                arg0: p('sf.jwt.keystorePath'),
+                arg1: p('secure::sf.jwt.keystorePassword'),
+                arg2: p('sf.jwt.keyAlias'),
+                arg3: p('secure::sf.jwt.clientId'),
+                arg4: p('sf.jwt.username'),
+                arg5: p('sf.jwt.audience'),
+                arg6: p('sf.jwt.ttlSeconds') as Number
+            }]]]></java:args>
+        </java:invoke-static>
+    </sub-flow>
+
+    <sub-flow name="sf-generate-access-token">
+        <logger level="INFO" message="Gerando novo access token Salesforce via JWT Bearer"/>
+
+        <flow-ref name="sf-build-jwt"/>
+
+        <http:request method="POST" config-ref="SF_Token_Config" path="${sf.token.path}" target="tokenResponse">
+            <http:body><![CDATA[#[%dw 2.0
+output application/x-www-form-urlencoded
+---
+{
+    grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
+    assertion: vars.jwt
+}]]]></http:body>
+        </http:request>
+
+        <set-variable variableName="sfToken" value="#[vars.tokenResponse.access_token]"/>
+        <set-variable variableName="instanceUrl" value="#[vars.tokenResponse.instance_url]"/>
+
+        <os:store key="sfToken" objectStore="SF_Token_Store">
+            <os:value>#[{ accessToken: vars.sfToken, instanceUrl: vars.instanceUrl }]</os:value>
+        </os:store>
+
+        <logger level="INFO" message="#['Access token obtido. instance_url=' ++ (vars.instanceUrl default '')]"/>
+    </sub-flow>
+
+    <sub-flow name="sf-invalidate-access-token">
+        <try>
+            <os:remove key="sfToken" objectStore="SF_Token_Store"/>
+            <error-handler>
+                <on-error-continue type="OS:KEY_NOT_FOUND"/>
+            </error-handler>
+        </try>
+    </sub-flow>
+
+    <!-- ===================== ERROS ===================== -->
+
+    <error-handler name="Poc_Error_Handler">
+        <!-- 401 do bot/Salesforce: limpa o cache para a proxima chamada gerar token novo -->
+        <on-error-propagate type="HTTP:UNAUTHORIZED">
+            <flow-ref name="sf-invalidate-access-token"/>
+            <set-variable variableName="httpStatus" value="401"/>
+            <ee:transform>
+                <ee:message>
+                    <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{ erro: "UNAUTHORIZED", detalhe: error.errorMessage.payload default error.description }]]></ee:set-payload>
+                </ee:message>
+            </ee:transform>
+        </on-error-propagate>
+
+        <!-- Devolve o corpo de erro do Salesforce (ex.: invalid_grant, user hasn't approved this consumer) -->
+        <on-error-propagate type="HTTP:BAD_REQUEST, HTTP:FORBIDDEN, HTTP:NOT_FOUND">
+            <set-variable variableName="httpStatus" value="#[error.errorMessage.attributes.statusCode default 400]"/>
+            <ee:transform>
+                <ee:message>
+                    <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{ erro: error.errorType.identifier, detalhe: error.errorMessage.payload default error.description }]]></ee:set-payload>
+                </ee:message>
+            </ee:transform>
+        </on-error-propagate>
+
+        <on-error-propagate type="ANY">
+            <set-variable variableName="httpStatus" value="500"/>
+            <ee:transform>
+                <ee:message>
+                    <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{ erro: error.errorType.namespace ++ ":" ++ error.errorType.identifier, detalhe: error.description }]]></ee:set-payload>
+                </ee:message>
+            </ee:transform>
+        </on-error-propagate>
+    </error-handler>
+
+</mule>
